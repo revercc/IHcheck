@@ -118,7 +118,6 @@ size_t HexStrToByteArr(const char* pHexStr, BYTE*& pOutBytePtr)
     return nRt;
 }
 
-//�ַ���ת16����
 std::string HexStrToHex(std::string strHex)
 {
     std::string strRt = "";
@@ -299,7 +298,6 @@ int CInlineHookCheck::AddReloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data
                 DWORD relocate_item_rva = *(DWORD*)p_relocate + WORD(WORD((*((WORD*)((BYTE*)p_relocate + 8 + i))) << 4) >> 4);
                 DWORD relocate_item_va = rva_to_va(new_module, relocate_item_rva);
                 PVOID pTargetAddress = (PBYTE)file_buffer + relocate_item_va;
-                // �ض�λ
                 *(DWORD*)pTargetAddress = *(DWORD*)pTargetAddress - entry_address + (DWORD)old_module;
             }
         }
@@ -321,7 +319,6 @@ int CInlineHookCheck::StripReloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_da
         for (ULONG i = 0; i < p_relocate->SizeOfBlock - 8; i = i + 2) {
             if (0 != *((WORD*)((BYTE*)p_relocate + 8 + i))) {
                 PVOID pTargetAddress = (PBYTE)new_module + *(DWORD*)p_relocate + WORD(WORD((*((WORD*)((BYTE*)p_relocate + 8 + i))) << 4) >> 4);
-                // ȥ���ض�λ
                 *(DWORD*)pTargetAddress = *(DWORD*)pTargetAddress - (DWORD)old_module + entry_address;
             }
         }
@@ -463,12 +460,17 @@ int CInlineHookCheck::CmpTextSegment(HANDLE hProcess, PVOID old_module, PVOID ne
 void __stdcall CInlineHookCheck::timer_call_back(HWND hwnd, UINT message, UINT iTimerID, DWORD dwTime)
 {
     int ret = 0;
+    if (FALSE == set_debug_privilege()) {
+        return;
+    }
     HANDLE hProcess = OpenProcess(
         PROCESS_ALL_ACCESS,
         FALSE,
         target_pid);
-    if (NULL == hProcess)
+    if (NULL == hProcess) {
+        ExitThread(0);
         return;
+    }
 
     // enum module list
     bool isPass = FALSE;
