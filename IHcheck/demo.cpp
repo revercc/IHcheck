@@ -54,7 +54,7 @@ int main(int argc, char* argv[], char* envp[])
         NULL,
         &si,
         &pi);
-
+    Sleep(1000);
     // inline hook check
     IHcheck::CInlineHookCheck inline_check(
         pi.dwProcessId, 

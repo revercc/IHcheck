@@ -1,15 +1,19 @@
 #include "inline_hook_check.h"
 #include <Windows.h>
+#include <WinBase.h>
 #include <Psapi.h>
 #include <tchar.h>
+#include <Locale.h>
 #include <tlhelp32.h>
 using namespace IHcheck;
-
+/*
 unsigned int CInlineHookCheck::timer_id = 0;
 unsigned int CInlineHookCheck::target_pid = 0;
 std::list<std::wstring> CInlineHookCheck::inline_check_list;
 std::list<IHcheck::WHITE_MARK> CInlineHookCheck::white_mark_list;
-PVOID ReadFileToMemoryW(const wchar_t* file_path)
+*/
+
+PVOID ReadFileToMemoryW(const wchar_t* file_path, size_t* p_file_size)
 {
     PVOID pfile_buffer = NULL;
     if (file_path == NULL) {
@@ -21,6 +25,7 @@ PVOID ReadFileToMemoryW(const wchar_t* file_path)
         if (0 == fseek(pFile, 0, SEEK_END)) {
             int file_size = ftell(pFile);
             if (-1 != file_size) {
+                *p_file_size = file_size;
                 pfile_buffer = malloc(file_size);
                 if (pfile_buffer != NULL) {
                     memset(pfile_buffer, 0, file_size);
@@ -38,7 +43,7 @@ PVOID ReadFileToMemoryW(const wchar_t* file_path)
     return 0;
 }
 
-PVOID ReadFileToMemory(const char* file_path)
+PVOID ReadFileToMemory(const char* file_path, size_t* p_file_size)
 {
     PVOID pfile_buffer = NULL;
     if (file_path == NULL) {
@@ -50,6 +55,7 @@ PVOID ReadFileToMemory(const char* file_path)
         if (0 == fseek(pFile, 0, SEEK_END)) {
             int file_size = ftell(pFile);
             if (-1 != file_size) {
+                *p_file_size = file_size;
                 pfile_buffer = malloc(file_size);
                 if (pfile_buffer != NULL) {
                     memset(pfile_buffer, 0, file_size);
@@ -270,19 +276,110 @@ ULONG CInlineHookCheck::rva_to_va(PVOID buffer, ULONG rva)
     return 0;
 }
 
-PVOID CInlineHookCheck::CopyTargetModule(HANDLE hProcess, HMODULE old_module, DWORD size_of_image) {
+int IHcheck::CInlineHookCheck::is_window10()
+{
+    typedef void(__stdcall* NTPROC)(DWORD*, DWORD*, DWORD*);
+    HINSTANCE hInstance = LoadLibraryA("ntdll.dll");
+    if (NULL != hInstance) {
+        DWORD major, minor, build_num;
+        NTPROC _RtlGetNtVersionNumbers = (NTPROC)GetProcAddress(hInstance, "RtlGetNtVersionNumbers");
+        if (NULL != _RtlGetNtVersionNumbers) {
+            _RtlGetNtVersionNumbers(&major, &minor, &build_num);
+            if (major == 10 && minor == 0) {
+                return 1;
+            }
+            else {
+                return 0;
+            }
+        }
+    }
+    return -1;
+}
+
+PVOID CInlineHookCheck::copy_module(HANDLE hProcess, PVOID file_buffer, size_t file_size, HMODULE old_module, DWORD size_of_image)
+{
     void* module_image = (UCHAR*)malloc(size_of_image);
     if (NULL != module_image) {
         memset(module_image, 0, size_of_image);
-        if (!ReadProcessMemory(hProcess, old_module, module_image, size_of_image, NULL)) {
-            free(module_image);
-            module_image = NULL;
+        // copy pe file header
+        memcpy_s(module_image, size_of_image, file_buffer, (file_size < USN_PAGE_SIZE) ? file_size : USN_PAGE_SIZE);
+        PIMAGE_DOS_HEADER p_dos_header = (PIMAGE_DOS_HEADER)file_buffer;
+        PIMAGE_FILE_HEADER p_file_header = (PIMAGE_FILE_HEADER)((PBYTE)p_dos_header + p_dos_header->e_lfanew + 0x4);
+        PIMAGE_OPTIONAL_HEADER32 p_optional_header = (PIMAGE_OPTIONAL_HEADER32)((PBYTE)p_file_header + 0x14);
+        PIMAGE_SECTION_HEADER p_section_start = (PIMAGE_SECTION_HEADER)((PBYTE)p_optional_header + p_file_header->SizeOfOptionalHeader);
+        // copy all section
+        for (int i = 0; i < p_file_header->NumberOfSections; i++) {
+            DWORD old_protect = 0;
+            if (VirtualProtectEx(hProcess, (PBYTE)old_module + p_section_start->VirtualAddress, p_section_start->SizeOfRawData, PAGE_EXECUTE_READ, &old_protect)) {
+                if (!ReadProcessMemory(
+                    hProcess,
+                    (PBYTE)old_module + p_section_start->VirtualAddress,
+                    (PBYTE)module_image + p_section_start->VirtualAddress,
+                    p_section_start->SizeOfRawData,
+                    NULL)) {
+                    free(module_image);
+                    module_image = NULL;
+                }
+                VirtualProtectEx(hProcess, (PBYTE)old_module + p_section_start->VirtualAddress, p_section_start->SizeOfRawData, old_protect, &old_protect);
+            }
+            else{
+                if (!ReadProcessMemory(
+                    hProcess,
+                    (PBYTE)old_module + p_section_start->VirtualAddress,
+                    (PBYTE)module_image + p_section_start->VirtualAddress,
+                    p_section_start->SizeOfRawData,
+                    NULL)) {
+                    free(module_image);
+                    module_image = NULL;
+                }
+            }
+            p_section_start++;
         }
     }
     return module_image;
 }
 
-int CInlineHookCheck::AddReloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module, PVOID file_buffer) {
+int CInlineHookCheck::do_reloc_import_table(
+    HANDLE hProcess, 
+    DWORD entry_address, 
+    PIMAGE_DATA_DIRECTORY p_data_directory_import, 
+    PVOID old_module, 
+    PVOID new_module, 
+    PVOID file_buffer)
+{
+    if (new_module == NULL ||
+        file_buffer == NULL ||
+        entry_address == NULL ||
+        p_data_directory_import == NULL ||
+        (p_data_directory_import != NULL && p_data_directory_import->Size == 0)) {
+        return -1;
+    }
+    DWORD import_rva = p_data_directory_import->VirtualAddress;
+    IMAGE_IMPORT_DESCRIPTOR* p_import_descriptor = (PIMAGE_IMPORT_DESCRIPTOR)((PBYTE)new_module + import_rva);
+    while (p_import_descriptor->Name) {
+        PIMAGE_THUNK_DATA p_file_thunk_data_INT = (PIMAGE_THUNK_DATA)((PBYTE)file_buffer + rva_to_va(new_module, p_import_descriptor->OriginalFirstThunk));
+        PIMAGE_THUNK_DATA p_file_thunk_data_IAT = (PIMAGE_THUNK_DATA)((PBYTE)file_buffer + rva_to_va(new_module, p_import_descriptor->FirstThunk));
+        PIMAGE_THUNK_DATA p_map_thunk_data_INT = (PIMAGE_THUNK_DATA)((PBYTE)new_module +  p_import_descriptor->OriginalFirstThunk);
+        PIMAGE_THUNK_DATA p_map_thunk_data_IAT = (PIMAGE_THUNK_DATA)((PBYTE)new_module + p_import_descriptor->FirstThunk);
+
+        while (p_file_thunk_data_INT->u1.AddressOfData) {
+            // change import address table
+            p_file_thunk_data_IAT->u1.Function = p_map_thunk_data_IAT->u1.Function;
+            // next function
+            p_file_thunk_data_INT++;
+            p_file_thunk_data_IAT++;
+            p_map_thunk_data_INT++;
+            p_map_thunk_data_IAT++;
+        }
+        // next dll
+        p_import_descriptor++;
+    }
+    end: 
+    return 0;
+}
+
+int CInlineHookCheck::do_reloc_table(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module, PVOID file_buffer) 
+{
     if (new_module == NULL ||
         file_buffer == NULL ||
         entry_address == NULL ||
@@ -293,12 +390,15 @@ int CInlineHookCheck::AddReloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data
     DWORD relocate_rva = p_data_directory_reloc->VirtualAddress;
     PIMAGE_BASE_RELOCATION p_relocate = (PIMAGE_BASE_RELOCATION)((PBYTE)new_module + relocate_rva);
     while (p_relocate->SizeOfBlock != 0 && p_relocate->VirtualAddress != 0) {
-        for (ULONG i = 0; i < p_relocate->SizeOfBlock - 8; i = i + 2) {
-            if (0 != *((WORD*)((BYTE*)p_relocate + 8 + i))) {
-                DWORD relocate_item_rva = *(DWORD*)p_relocate + WORD(WORD((*((WORD*)((BYTE*)p_relocate + 8 + i))) << 4) >> 4);
+        for (ULONG i = 0; i < p_relocate->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION); i = i + sizeof(WORD)) {
+            WORD TypeOffset = *((PWORD)((PBYTE)p_relocate + sizeof(IMAGE_BASE_RELOCATION) + i));
+            WORD _offset = WORD(WORD(TypeOffset << 4) >> 4);
+            WORD _type = TypeOffset >> 12;
+            if (0 != TypeOffset && IMAGE_REL_BASED_ABSOLUTE != _type) {
+                DWORD relocate_item_rva = p_relocate->VirtualAddress + _offset;
                 DWORD relocate_item_va = rva_to_va(new_module, relocate_item_rva);
                 PVOID pTargetAddress = (PBYTE)file_buffer + relocate_item_va;
-                *(DWORD*)pTargetAddress = *(DWORD*)pTargetAddress - entry_address + (DWORD)old_module;
+                *(PDWORD)pTargetAddress = *(PDWORD)pTargetAddress - entry_address + (DWORD)old_module;
             }
         }
         p_relocate = (PIMAGE_BASE_RELOCATION)((BYTE*)p_relocate + p_relocate->SizeOfBlock);
@@ -306,7 +406,8 @@ int CInlineHookCheck::AddReloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data
     return 0;
 }
 
-int CInlineHookCheck::StripReloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module) {
+int CInlineHookCheck::strip_reloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module) 
+{
     if (new_module == NULL ||
         entry_address == NULL ||
         p_data_directory_reloc == NULL ||
@@ -316,10 +417,14 @@ int CInlineHookCheck::StripReloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_da
     DWORD relocate_rva = p_data_directory_reloc->VirtualAddress;
     PIMAGE_BASE_RELOCATION p_relocate = (PIMAGE_BASE_RELOCATION)((PBYTE)new_module + relocate_rva);
     while (p_relocate->SizeOfBlock != 0 && p_relocate->VirtualAddress != 0) {
-        for (ULONG i = 0; i < p_relocate->SizeOfBlock - 8; i = i + 2) {
-            if (0 != *((WORD*)((BYTE*)p_relocate + 8 + i))) {
-                PVOID pTargetAddress = (PBYTE)new_module + *(DWORD*)p_relocate + WORD(WORD((*((WORD*)((BYTE*)p_relocate + 8 + i))) << 4) >> 4);
-                *(DWORD*)pTargetAddress = *(DWORD*)pTargetAddress - (DWORD)old_module + entry_address;
+        for (ULONG i = 0; i < p_relocate->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION); i = i + sizeof(WORD)) {
+            WORD TypeOffset = *((PWORD)((PBYTE)p_relocate + sizeof(IMAGE_BASE_RELOCATION) + i));
+            WORD _offset = WORD(WORD(TypeOffset << 4) >> 4);
+            WORD _type = TypeOffset >> 12;
+            if (0 != TypeOffset && IMAGE_REL_BASED_ABSOLUTE != _type) {
+                DWORD relocate_item_rva = p_relocate->VirtualAddress + _offset;
+                PVOID pTargetAddress = (PBYTE)new_module + relocate_item_rva;
+                *(PDWORD)pTargetAddress = *(PDWORD)pTargetAddress - (DWORD)old_module + entry_address;
             }
         }
         p_relocate = (PIMAGE_BASE_RELOCATION)((BYTE*)p_relocate + p_relocate->SizeOfBlock);
@@ -327,7 +432,7 @@ int CInlineHookCheck::StripReloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_da
     return 0;
 }
 
-bool CInlineHookCheck::DeleteInlineHook(HANDLE hProcess, PVOID old_module, PVOID file_text_section, DWORD size)
+bool CInlineHookCheck::delete_inline_hook(HANDLE hProcess, PVOID old_module, PVOID file_text_section, DWORD size)
 {
     bool ret = 0;
     bool is_delete = true;
@@ -386,7 +491,8 @@ bool CInlineHookCheck::DeleteInlineHook(HANDLE hProcess, PVOID old_module, PVOID
 // ret -1: not check inline hook
 // ret -2: delete inline hook is error
 // ret  0: delete inline hook is success
-int CInlineHookCheck::CmpTextSegment(HANDLE hProcess, PVOID old_module, PVOID new_module, PVOID file_buffer, std::list<ULONG_PTR>& white_addr_list) {
+int CInlineHookCheck::cmp_text_segment(HANDLE hProcess, PVOID old_module, PVOID new_module, PVOID file_buffer, std::list<ULONG_PTR>& white_addr_list)
+{
     if (NULL == hProcess ||
         NULL == old_module ||
         NULL == new_module ||
@@ -419,16 +525,6 @@ int CInlineHookCheck::CmpTextSegment(HANDLE hProcess, PVOID old_module, PVOID ne
     PIMAGE_SECTION_HEADER p_file_text_section = (PIMAGE_SECTION_HEADER)((PBYTE)p_optional_header + p_file_header->SizeOfOptionalHeader) + text_index;
     PVOID p_file_text = (PVOID)((PBYTE)file_buffer + rva_to_va(new_module, p_file_text_section->VirtualAddress));
     
-    // The starting position of the text segment of win7 part of the system library contains the import table,
-    // which requires special processing
-    /*
-    for (ULONG i = p_current_entry_offset; i < p_new_module_text_section->SizeOfRawData; i++) {
-        if (*((BYTE*)p_new_module_text + i) != *((BYTE*)p_file_text + i)) {
-            printf("offset is %x\n", i);
-            return -1;
-        }
-    }
-    */
     // filter white addr list
     int ret = -1;
     for (ULONG i = 0; i < p_new_module_text_section->SizeOfRawData; i++) {
@@ -442,8 +538,14 @@ int CInlineHookCheck::CmpTextSegment(HANDLE hProcess, PVOID old_module, PVOID ne
                     break;
                 }
             }
-            if (-1 == ret) {
-                continue;
+            if (-1 != ret) {
+                /*
+                printf("p_new_module_text : %p", p_new_module_text);
+                printf("p_file_text : %p", p_file_text);
+                printf("offset : %x", i);
+                MessageBox(NULL, TEXT("inline hook"), NULL, MB_OK);
+                */
+                break;
             }
         }
     }
@@ -451,13 +553,14 @@ int CInlineHookCheck::CmpTextSegment(HANDLE hProcess, PVOID old_module, PVOID ne
     // delete inline hook
     if (0 == ret) {
         PVOID p_old_module_text = (PVOID)((PBYTE)old_module + p_new_module_text_section->VirtualAddress);
-        if (!DeleteInlineHook(hProcess, p_old_module_text, p_file_text, p_new_module_text_section->SizeOfRawData)) {
+        if (!delete_inline_hook(hProcess, p_old_module_text, p_file_text, p_new_module_text_section->SizeOfRawData)) {
             ret = -2;
         }
     }
     return ret;
 }
-void __stdcall CInlineHookCheck::timer_call_back(HWND hwnd, UINT message, UINT iTimerID, DWORD dwTime)
+
+void CInlineHookCheck::start_hook_check()
 {
     int ret = 0;
     if (FALSE == set_debug_privilege()) {
@@ -474,6 +577,7 @@ void __stdcall CInlineHookCheck::timer_call_back(HWND hwnd, UINT message, UINT i
 
     // enum module list
     bool isPass = FALSE;
+    //
     HANDLE hModuleSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, target_pid);
     if (hModuleSnap != INVALID_HANDLE_VALUE) {
         MODULEENTRY32 me32;
@@ -495,14 +599,14 @@ void __stdcall CInlineHookCheck::timer_call_back(HWND hwnd, UINT message, UINT i
                 }
             }
             if (TRUE == isPass) {
-                continue;
+                //continue;
             }
-
             // do check
             PVOID new_module = NULL;
             HMODULE old_module = (HMODULE)me32.modBaseAddr;
             PVOID file_buffer = NULL;
-            file_buffer = ReadFileToMemoryW(me32.szExePath);
+            size_t file_size = 0;
+            file_buffer = ReadFileToMemoryW(me32.szExePath, &file_size);
             if (file_buffer == NULL) {
                 continue;
             }
@@ -510,10 +614,12 @@ void __stdcall CInlineHookCheck::timer_call_back(HWND hwnd, UINT message, UINT i
             PIMAGE_FILE_HEADER p_file_header = (PIMAGE_FILE_HEADER)((PBYTE)p_dos_header + p_dos_header->e_lfanew + 0x4);
             PIMAGE_OPTIONAL_HEADER32 p_optional_header = (PIMAGE_OPTIONAL_HEADER32)((PBYTE)p_file_header + 0x14);
             PIMAGE_DATA_DIRECTORY p_data_directory = (PIMAGE_DATA_DIRECTORY)p_optional_header->DataDirectory;
+            PIMAGE_DATA_DIRECTORY p_data_directory_import = &p_data_directory[1];
             PIMAGE_DATA_DIRECTORY p_data_directory_reloc = &p_data_directory[5];
             DWORD size_of_image = p_optional_header->SizeOfImage;
             if (p_file_header->Machine == IMAGE_FILE_MACHINE_I386) {
-                new_module = CopyTargetModule(hProcess, old_module, size_of_image);
+                printf("%ls\n", me32.szModule);
+                new_module = copy_module(hProcess, file_buffer, file_size, old_module, size_of_image);
                 if (new_module != NULL) {
                     // init white addr list
                     std::list<ULONG_PTR> white_addr_list = { 0 };
@@ -521,8 +627,8 @@ void __stdcall CInlineHookCheck::timer_call_back(HWND hwnd, UINT message, UINT i
                         WHITE_MARK white_mark = *it;
                         if (!_wcsicmp(white_mark.module_name.c_str(), me32.szExePath)) {
                             ULONG_PTR white_addr = ScanMarkCode(
-                                GetCurrentProcess(), 
-                                white_mark.mark_string.c_str(), 
+                                GetCurrentProcess(),
+                                white_mark.mark_string.c_str(),
                                 (ULONG_PTR)new_module, size_of_image, white_mark.offset);
                             if (0 != white_addr) {
                                 white_addr_list.insert(white_addr_list.begin(), white_addr);
@@ -531,11 +637,15 @@ void __stdcall CInlineHookCheck::timer_call_back(HWND hwnd, UINT message, UINT i
 
                     }
 
-                    // do reloc
-                    AddReloc(p_optional_header->ImageBase, p_data_directory_reloc, old_module, new_module, file_buffer);
+                    // .text to reloc
+                    do_reloc_table(p_optional_header->ImageBase, p_data_directory_reloc, old_module, new_module, file_buffer);
+                    // windows 7's import table to reloc
+                    if (!is_window10()) {
+                        // import table to reloc
+                        do_reloc_import_table(hProcess, p_optional_header->ImageBase, p_data_directory_import, old_module, new_module, file_buffer);
+                    }
                     // check text segment
-                    int ret = CmpTextSegment(hProcess, old_module, new_module, file_buffer, white_addr_list);
-                    printf("\n%ls :", me32.szModule);
+                    int ret = cmp_text_segment(hProcess, old_module, new_module, file_buffer, white_addr_list);
                     if (0 == ret) {
                         //KillTimer(NULL, timer_id);
                         printf("delete inline hook is success\n");
@@ -556,43 +666,18 @@ void __stdcall CInlineHookCheck::timer_call_back(HWND hwnd, UINT message, UINT i
     CloseHandle(hProcess);
 }
 
-unsigned int __stdcall CInlineHookCheck::check_thread(void* lpThreadParameter) {
-    MSG msg;
-    timer_id = SetTimer(NULL, 0, 3000, (TIMERPROC)timer_call_back);
-    if (NULL != timer_id) {
-        while (GetMessage(&msg, NULL, NULL, NULL)) {
-            if (msg.message == WM_TIMER) {
-                TranslateMessage(&msg);
-                DispatchMessage(&msg);
-            }
-        }
-    }
-    return 0;
-}
-
-void CInlineHookCheck::inline_hook_check()
-{
-    HANDLE hThread = CreateThread(
-        NULL,
-        NULL,
-        (LPTHREAD_START_ROUTINE)check_thread,
-        NULL,
-        NULL,
-        NULL);
-    if (NULL != hThread) {
-        CloseHandle(hThread);
-    }
-}
-
 CInlineHookCheck::CInlineHookCheck(unsigned int pid, std::list<std::wstring> check_list, std::list<IHcheck::WHITE_MARK> white_addr_mark_list)
 {
+    
+    //Wow64DisableWow64FsRedirection(&FsRedirection_old_value);
     target_pid = pid;
     inline_check_list = check_list;
     white_mark_list = white_addr_mark_list;
     //start inline hook check
-    inline_hook_check();
+    start_hook_check();
 }
 
 CInlineHookCheck::~CInlineHookCheck() 
 {
+    //Wow64RevertWow64FsRedirection(FsRedirection_old_value);
 }
