@@ -13,8 +13,14 @@ namespace IHcheck {
         std::wstring module_name;
         std::string mark_string;
         int offset;
+        size_t size;
     }WHITE_MARK, * PWHITE_MARK;
     
+    typedef struct _WHITE_ADDRESS {
+        ULONG_PTR address;
+        size_t size;
+    }WHITE_ADDRESS, * PWHITE_ADDRESS;
+
     class CInlineHookCheck
     {
     public:
@@ -25,11 +31,13 @@ namespace IHcheck {
         bool set_debug_privilege();
         ULONG rva_to_va(PVOID buffer, ULONG rva);
         PVOID copy_module(HANDLE hProcess, PVOID file_buffer, size_t file_size, HMODULE old_module, DWORD size_of_image);
+        int strip_function_forward(PVOID file_buffer, PVOID new_module);
         int do_reloc_import_table(HANDLE hProcess, DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module, PVOID file_buffer);
         int do_reloc_table(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module, PVOID file_buffer);
         int strip_reloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module);
+        void init_white_addr_list(PVOID new_module, DWORD size_of_image, MODULEENTRY32 module32_info);
         bool delete_inline_hook(HANDLE hProcess, PVOID old_module, PVOID file_text_section, DWORD size);
-        int cmp_text_segment(HANDLE hProcess, PVOID old_module, PVOID new_module, PVOID file_buffer, std::list<ULONG_PTR>& white_addr_list);
+        int cmp_text_segment(HANDLE hProcess, PVOID old_module, PVOID new_module, PVOID file_buffer, std::list<WHITE_ADDRESS>& white_addr_list);
         PVOID find_export_address(PVOID new_module, DWORD function_ordinal, MODULEENTRY32 module_info, char* function_name);
         MODULEENTRY32 get_target_process_module(std::wstring module_name);
         int is_window10();
@@ -40,5 +48,6 @@ namespace IHcheck {
         unsigned int target_pid;
         std::list<std::wstring> inline_check_list;
         std::list<IHcheck::WHITE_MARK> white_mark_list;
+        std::list<WHITE_ADDRESS> white_addr_list;
     };
 }

@@ -6,12 +6,6 @@
 #include <Locale.h>
 #include <tlhelp32.h>
 using namespace IHcheck;
-/*
-unsigned int CInlineHookCheck::timer_id = 0;
-unsigned int CInlineHookCheck::target_pid = 0;
-std::list<std::wstring> CInlineHookCheck::inline_check_list;
-std::list<IHcheck::WHITE_MARK> CInlineHookCheck::white_mark_list;
-*/
 
 PVOID ReadFileToMemoryW(const wchar_t* file_path, size_t* p_file_size)
 {
@@ -165,7 +159,14 @@ std::string HexStrToHex(std::string strHex)
     return strRt;
 }
 
-ULONG_PTR ScanMarkCode(HANDLE hProcess, const char* strMarkCode, ULONG_PTR pStartAddr, size_t nScanSize, int nOffset, int nCount = 1)
+ULONG_PTR 
+ScanMarkCode(
+    HANDLE hProcess, 
+    const char* strMarkCode,
+    ULONG_PTR pStartAddr,
+    size_t nScanSize,
+    int nOffset,
+    int nCount = 1)
 {
     ULONG_PTR pRt = 0;
     PBYTE pCode = NULL;
@@ -340,6 +341,34 @@ PVOID CInlineHookCheck::copy_module(HANDLE hProcess, PVOID file_buffer, size_t f
     return module_image;
 }
 
+int CInlineHookCheck::strip_function_forward(PVOID file_buffer, PVOID new_module)
+{
+    if (NULL == file_buffer || NULL == new_module) {
+        return -1;
+    }
+
+    PIMAGE_DOS_HEADER p_dos_header = (PIMAGE_DOS_HEADER)file_buffer;
+    PIMAGE_FILE_HEADER p_file_header = (PIMAGE_FILE_HEADER)((PBYTE)p_dos_header + p_dos_header->e_lfanew + 0x4);
+    PIMAGE_OPTIONAL_HEADER32 p_optional_header = (PIMAGE_OPTIONAL_HEADER32)((PBYTE)p_file_header + 0x14);
+    PIMAGE_DATA_DIRECTORY p_data_directory = (PIMAGE_DATA_DIRECTORY)p_optional_header->DataDirectory;
+    PIMAGE_DATA_DIRECTORY p_data_directory_export = &p_data_directory[0];
+    DWORD export_rva = p_data_directory_export->VirtualAddress;
+    // map export descriptor
+    PIMAGE_EXPORT_DIRECTORY p_map_export_descriptor = (PIMAGE_EXPORT_DIRECTORY)((PBYTE)new_module + export_rva);
+    PDWORD map_export_address_rva_array = (PDWORD)((PBYTE)new_module + p_map_export_descriptor->AddressOfFunctions);
+    // file export descriptor
+    PIMAGE_EXPORT_DIRECTORY p_file_export_descriptor = (PIMAGE_EXPORT_DIRECTORY)((PBYTE)file_buffer + rva_to_va(new_module, export_rva));
+    PDWORD file_export_address_rva_array = (PDWORD)((PBYTE)file_buffer + rva_to_va(new_module, p_file_export_descriptor->AddressOfFunctions));
+
+    // enum all export function
+    for (DWORD i = 0; i < p_file_export_descriptor->NumberOfFunctions; i++) {
+        //PVOID p_forward_name = (PVOID)((PBYTE)file_buffer + rva_to_va(new_module, file_export_address_rva_array[i]));
+        file_export_address_rva_array[i] = map_export_address_rva_array[i];
+    }
+    return 0;
+}
+
+
 int CInlineHookCheck::do_reloc_import_table(
     HANDLE hProcess, 
     DWORD entry_address, 
@@ -379,7 +408,13 @@ int CInlineHookCheck::do_reloc_import_table(
     return 0;
 }
 
-int CInlineHookCheck::do_reloc_table(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module, PVOID file_buffer) 
+int 
+CInlineHookCheck::do_reloc_table(
+    DWORD entry_address, 
+    PIMAGE_DATA_DIRECTORY p_data_directory_reloc, 
+    PVOID old_module, 
+    PVOID new_module, 
+    PVOID file_buffer) 
 {
     if (new_module == NULL ||
         file_buffer == NULL ||
@@ -407,7 +442,12 @@ int CInlineHookCheck::do_reloc_table(DWORD entry_address, PIMAGE_DATA_DIRECTORY 
     return 0;
 }
 
-int CInlineHookCheck::strip_reloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_data_directory_reloc, PVOID old_module, PVOID new_module) 
+int 
+CInlineHookCheck::strip_reloc(
+    DWORD entry_address, 
+    PIMAGE_DATA_DIRECTORY p_data_directory_reloc, 
+    PVOID old_module, 
+    PVOID new_module) 
 {
     if (new_module == NULL ||
         entry_address == NULL ||
@@ -433,7 +473,50 @@ int CInlineHookCheck::strip_reloc(DWORD entry_address, PIMAGE_DATA_DIRECTORY p_d
     return 0;
 }
 
-bool CInlineHookCheck::delete_inline_hook(HANDLE hProcess, PVOID old_module, PVOID file_text_section, DWORD size)
+void 
+CInlineHookCheck::init_white_addr_list(
+    PVOID new_module, 
+    DWORD size_of_image,
+    MODULEENTRY32 module32_info)
+{
+    // init white addr list
+    white_addr_list.clear();
+    // kernel32.dll 's SetUnhandledExceptionFilter function header machine code is modified by the system
+    if (!_wcsicmp(module32_info.szModule, L"kernel32.dll")) {
+        HMODULE kernel_module = LoadLibrary(module32_info.szExePath);
+        if (kernel_module) {
+            WHITE_ADDRESS white_address_info = { 0 };
+            white_address_info.address = (ULONG_PTR)((PBYTE)GetProcAddress(kernel_module, "SetUnhandledExceptionFilter") -
+                (DWORD)kernel_module + (DWORD)new_module);
+            white_address_info.size = 5;
+            white_addr_list.insert(white_addr_list.begin(), white_address_info);
+        }
+    }
+    // init user define white addr
+    for (std::list<WHITE_MARK>::iterator it = white_mark_list.begin(); it != white_mark_list.end(); it++) {
+        WHITE_MARK white_mark = *it;
+        if (!_wcsicmp(white_mark.module_name.c_str(), module32_info.szExePath)) {
+            ULONG_PTR white_addr = ScanMarkCode(
+                GetCurrentProcess(),
+                white_mark.mark_string.c_str(),
+                (ULONG_PTR)new_module, size_of_image, white_mark.offset);
+            if (0 != white_addr) {
+                WHITE_ADDRESS white_address_info = { 0 };
+                white_address_info.address = white_addr;
+                white_address_info.size = white_mark.size;
+                white_addr_list.insert(white_addr_list.begin(), white_address_info);
+            }
+        }
+
+    }
+}
+
+bool 
+CInlineHookCheck::delete_inline_hook(
+    HANDLE hProcess,
+    PVOID old_module, 
+    PVOID file_text_section,
+    DWORD size)
 {
     bool ret = 0;
     bool is_delete = true;
@@ -492,7 +575,13 @@ bool CInlineHookCheck::delete_inline_hook(HANDLE hProcess, PVOID old_module, PVO
 // ret -1: not check inline hook
 // ret -2: delete inline hook is error
 // ret  0: delete inline hook is success
-int CInlineHookCheck::cmp_text_segment(HANDLE hProcess, PVOID old_module, PVOID new_module, PVOID file_buffer, std::list<ULONG_PTR>& white_addr_list)
+int 
+CInlineHookCheck::cmp_text_segment(
+    HANDLE hProcess, 
+    PVOID old_module, 
+    PVOID new_module, 
+    PVOID file_buffer, 
+    std::list<WHITE_ADDRESS>& white_addr_list)
 {
     if (NULL == hProcess ||
         NULL == old_module ||
@@ -531,21 +620,15 @@ int CInlineHookCheck::cmp_text_segment(HANDLE hProcess, PVOID old_module, PVOID 
     for (ULONG i = 0; i < p_new_module_text_section->SizeOfRawData; i++) {
         if (*((BYTE*)p_new_module_text + i) != *((BYTE*)p_file_text + i)) {
             ret = 0;
-            std::list<ULONG_PTR>::iterator it;
+            std::list<WHITE_ADDRESS>::iterator it;
             for (it = white_addr_list.begin(); it != white_addr_list.end(); it++) {
-                if ((ULONG_PTR)((PBYTE)p_new_module_text + i) >= *it &&
-                    (ULONG_PTR)((PBYTE)p_new_module_text + i - 4) <= *it) {
+                if ((ULONG_PTR)((PBYTE)p_new_module_text + i) >= (*it).address &&
+                    (ULONG_PTR)((PBYTE)p_new_module_text + i - (*it).size) <= (*it).address) {
                     ret = -1;
                     break;
                 }
             }
             if (-1 != ret) {
-                /*
-                printf("p_new_module_text : %p", p_new_module_text);
-                printf("p_file_text : %p", p_file_text);
-                printf("offset : %x", i);
-                MessageBox(NULL, TEXT("inline hook"), NULL, MB_OK);
-                */
                 break;
             }
         }
@@ -578,7 +661,6 @@ void CInlineHookCheck::start_hook_check()
 
     // enum module list
     bool isPass = FALSE;
-    //
     HANDLE hModuleSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, target_pid);
     if (hModuleSnap != INVALID_HANDLE_VALUE) {
         MODULEENTRY32 me32;
@@ -618,28 +700,17 @@ void CInlineHookCheck::start_hook_check()
             PIMAGE_DATA_DIRECTORY p_data_directory_import = &p_data_directory[1];
             PIMAGE_DATA_DIRECTORY p_data_directory_reloc = &p_data_directory[5];
             DWORD size_of_image = p_optional_header->SizeOfImage;
+            // filter 32 bit module
             if (p_file_header->Machine == IMAGE_FILE_MACHINE_I386) {
                 printf("%ls\n", me32.szModule);
                 new_module = copy_module(hProcess, file_buffer, file_size, old_module, size_of_image);
                 if (new_module != NULL) {
                     // init white addr list
-                    std::list<ULONG_PTR> white_addr_list = { 0 };
-                    for (std::list<WHITE_MARK>::iterator it = white_mark_list.begin(); it != white_mark_list.end(); it++) {
-                        WHITE_MARK white_mark = *it;
-                        if (!_wcsicmp(white_mark.module_name.c_str(), me32.szExePath)) {
-                            ULONG_PTR white_addr = ScanMarkCode(
-                                GetCurrentProcess(),
-                                white_mark.mark_string.c_str(),
-                                (ULONG_PTR)new_module, size_of_image, white_mark.offset);
-                            if (0 != white_addr) {
-                                white_addr_list.insert(white_addr_list.begin(), white_addr);
-                            }
-                        }
-
-                    }
-
+                    init_white_addr_list(new_module, size_of_image, me32);
                     // .text to reloc
                     do_reloc_table(p_optional_header->ImageBase, p_data_directory_reloc, old_module, new_module, file_buffer);
+                    // strip function forward
+                    strip_function_forward(file_buffer, new_module);
                     // windows 7's import table to reloc
                     if (!is_window10()) {
                         // import table to reloc
@@ -648,7 +719,6 @@ void CInlineHookCheck::start_hook_check()
                     // check text segment
                     int ret = cmp_text_segment(hProcess, old_module, new_module, file_buffer, white_addr_list);
                     if (0 == ret) {
-                        //KillTimer(NULL, timer_id);
                         printf("delete inline hook is success\n");
                     }
                     else if (-2 == ret) {
@@ -667,9 +737,11 @@ void CInlineHookCheck::start_hook_check()
     CloseHandle(hProcess);
 }
 
-CInlineHookCheck::CInlineHookCheck(unsigned int pid, std::list<std::wstring> check_list, std::list<IHcheck::WHITE_MARK> white_addr_mark_list)
+CInlineHookCheck::CInlineHookCheck(
+    unsigned int pid, 
+    std::list<std::wstring> check_list, 
+    std::list<IHcheck::WHITE_MARK> white_addr_mark_list)
 {
-    
     //Wow64DisableWow64FsRedirection(&FsRedirection_old_value);
     target_pid = pid;
     inline_check_list = check_list;
