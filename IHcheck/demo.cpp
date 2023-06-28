@@ -37,6 +37,7 @@ int main(int argc, char* argv[], char* envp[])
     white_mark_tmp.mark_string = "8B45E48B008B4DF064890D00000000595f5e5bc9";
     white_mark_tmp.module_name = SSOPlatform_path;
     white_mark_tmp.offset = -0x4;
+    white_mark_tmp.size = 4;
     wegame_white_addr_mark_list.insert(wegame_white_addr_mark_list.begin(), { white_mark_tmp });
     
     // create wegame.exe process

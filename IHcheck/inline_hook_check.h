@@ -38,8 +38,6 @@ namespace IHcheck {
         void init_white_addr_list(PVOID new_module, DWORD size_of_image, MODULEENTRY32 module32_info);
         bool delete_inline_hook(HANDLE hProcess, PVOID old_module, PVOID file_text_section, DWORD size);
         int cmp_text_segment(HANDLE hProcess, PVOID old_module, PVOID new_module, PVOID file_buffer, std::list<WHITE_ADDRESS>& white_addr_list);
-        PVOID find_export_address(PVOID new_module, DWORD function_ordinal, MODULEENTRY32 module_info, char* function_name);
-        MODULEENTRY32 get_target_process_module(std::wstring module_name);
         int is_window10();
 
     private:
