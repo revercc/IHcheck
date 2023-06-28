@@ -28,11 +28,12 @@ white_mark_tmp.offset = -0x4;
 white_mark_tmp.size = 4;
 wegame_white_addr_mark_list.insert(wegame_white_addr_mark_list.begin(), { white_mark_tmp });
 ```
-③ Finally, create the CInlineHookCheck object and pass in the process pid, inline_check_list, and white_addr_mark_list
+③ Finally, create the CInlineHookCheck object and pass in the process pid, inline_check_list, and white_addr_mark_list。If the last parameter is set to true, all modules are detected by default。
 ```
 // inline hook check
 IHcheck::CInlineHookCheck inline_check(
     pi.dwProcessId, 
     wegame_inline_check_list, 
-    wegame_white_addr_mark_list);
+    wegame_white_addr_mark_list,
+    true);
 ```
