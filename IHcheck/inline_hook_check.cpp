@@ -597,7 +597,7 @@ CInlineHookCheck::cmp_text_segment(
     // get ".text" section index
     int text_index = -1;
     for (int i = 0; i < p_file_header->NumberOfSections; i++) {
-        if (!strcmp((const char*)p_section_start->Name, ".text")) {
+        if (!strncmp((const char*)p_section_start->Name, ".text", strlen(".text"))) {
             text_index = i;
             break;
         }
@@ -703,7 +703,7 @@ void CInlineHookCheck::start_hook_check()
             DWORD size_of_image = p_optional_header->SizeOfImage;
             // filter 32 bit module
             if (p_file_header->Machine == IMAGE_FILE_MACHINE_I386) {
-                printf("%ls\n", me32.szModule);
+                
                 new_module = copy_module(hProcess, file_buffer, file_size, old_module, size_of_image);
                 if (new_module != NULL) {
                     // init white addr list
@@ -720,13 +720,14 @@ void CInlineHookCheck::start_hook_check()
                     // check text segment
                     int ret = cmp_text_segment(hProcess, old_module, new_module, file_buffer, white_addr_list);
                     if (0 == ret) {
-                        printf("delete inline hook is success\n");
+                        printf("[-] %ls : delete inline hook is success\n", me32.szModule);
+                        
                     }
                     else if (-2 == ret) {
-                        printf("delete inline hook is error\n");
+                        printf("[-] %ls : delete inline hook is error\n", me32.szModule);
                     }
                     else {
-                        printf("not find inline hook\n");
+                        printf("[+] %ls : not find inline hook\n", me32.szModule);
                     }
                     free(new_module);
                 }
