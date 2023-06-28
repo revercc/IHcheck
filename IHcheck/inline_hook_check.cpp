@@ -315,7 +315,7 @@ PVOID CInlineHookCheck::copy_module(HANDLE hProcess, PVOID file_buffer, size_t f
                     hProcess,
                     (PBYTE)old_module + p_section_start->VirtualAddress,
                     (PBYTE)module_image + p_section_start->VirtualAddress,
-                    p_section_start->SizeOfRawData,
+                    p_section_start->Misc.VirtualSize,
                     NULL)) {
                     free(module_image);
                     module_image = NULL;
@@ -323,11 +323,12 @@ PVOID CInlineHookCheck::copy_module(HANDLE hProcess, PVOID file_buffer, size_t f
                 VirtualProtectEx(hProcess, (PBYTE)old_module + p_section_start->VirtualAddress, p_section_start->SizeOfRawData, old_protect, &old_protect);
             }
             else{
+                // windows7 kernel.dll cannot modify memory properties, Memory can be read directly
                 if (!ReadProcessMemory(
                     hProcess,
                     (PBYTE)old_module + p_section_start->VirtualAddress,
                     (PBYTE)module_image + p_section_start->VirtualAddress,
-                    p_section_start->SizeOfRawData,
+                    p_section_start->Misc.VirtualSize,
                     NULL)) {
                     free(module_image);
                     module_image = NULL;
@@ -549,7 +550,7 @@ int CInlineHookCheck::cmp_text_segment(HANDLE hProcess, PVOID old_module, PVOID 
             }
         }
     }
-
+    // 0370
     // delete inline hook
     if (0 == ret) {
         PVOID p_old_module_text = (PVOID)((PBYTE)old_module + p_new_module_text_section->VirtualAddress);
