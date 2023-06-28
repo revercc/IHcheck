@@ -60,7 +60,8 @@ int main(int argc, char* argv[], char* envp[])
     IHcheck::CInlineHookCheck inline_check(
         pi.dwProcessId, 
         wegame_inline_check_list, 
-        wegame_white_addr_mark_list);
+        wegame_white_addr_mark_list,
+        true);
     system("pause");
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);

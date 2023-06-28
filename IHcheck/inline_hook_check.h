@@ -24,7 +24,7 @@ namespace IHcheck {
     class CInlineHookCheck
     {
     public:
-        CInlineHookCheck(unsigned int pid, std::list<std::wstring> check_list, std::list<IHcheck::WHITE_MARK> white_addr_mark_list);
+        CInlineHookCheck(unsigned int pid, std::list<std::wstring> check_list, std::list<IHcheck::WHITE_MARK> white_addr_mark_list, bool is_all);
         ~CInlineHookCheck();
 
         void start_hook_check();
@@ -41,9 +41,10 @@ namespace IHcheck {
         int is_window10();
 
     private:
-        PVOID FsRedirection_old_value;
+        //PVOID FsRedirection_old_value;
         unsigned int timer_id;
         unsigned int target_pid;
+        bool is_check_all_module;
         std::list<std::wstring> inline_check_list;
         std::list<IHcheck::WHITE_MARK> white_mark_list;
         std::list<WHITE_ADDRESS> white_addr_list;

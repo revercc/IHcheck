@@ -660,7 +660,7 @@ void CInlineHookCheck::start_hook_check()
     }
 
     // enum module list
-    bool isPass = FALSE;
+    bool isPass = false;
     HANDLE hModuleSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, target_pid);
     if (hModuleSnap != INVALID_HANDLE_VALUE) {
         MODULEENTRY32 me32;
@@ -672,17 +672,18 @@ void CInlineHookCheck::start_hook_check()
 
         do {
             // filter check list
-            isPass = TRUE;
+            isPass = true;
             std::list<std::wstring>::iterator it;
             for (it = inline_check_list.begin(); it != inline_check_list.end(); it++) {
                 std::wstring white_file_path = *it;
                 if (!_wcsicmp(me32.szExePath, white_file_path.c_str())) {
-                    isPass = FALSE;
+                    isPass = false;
                     break;
                 }
             }
-            if (TRUE == isPass) {
-                //continue;
+            if (true == isPass &&
+                false == is_check_all_module) {
+                continue;
             }
             // do check
             PVOID new_module = NULL;
@@ -740,9 +741,11 @@ void CInlineHookCheck::start_hook_check()
 CInlineHookCheck::CInlineHookCheck(
     unsigned int pid, 
     std::list<std::wstring> check_list, 
-    std::list<IHcheck::WHITE_MARK> white_addr_mark_list)
+    std::list<IHcheck::WHITE_MARK> white_addr_mark_list,
+    bool is_all)
 {
     //Wow64DisableWow64FsRedirection(&FsRedirection_old_value);
+    is_check_all_module = is_all;
     target_pid = pid;
     inline_check_list = check_list;
     white_mark_list = white_addr_mark_list;
