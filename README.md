@@ -1,7 +1,7 @@
 # IHcheck
 It can detect if another process's dll module is inline hook, provided that the dll module is not shell, currently only supports x86 architecture
 # use
-Import inline_hook_check.cpp and inline_hook_check.h into your project. See how to use them in the demo.cpp file.
+Import inline_hook_check.cpp and inline_hook_check.h into your project. See how to use them in the demo.cpp file. The following uses the wegame.exe process as an example
 
 ① You can set which modules of the third-party process you want to detect. The WGLogin.dll and SSOPlatform.dll that detect the wegame.exe process are set in demo.cpp
 ```
@@ -37,3 +37,11 @@ IHcheck::CInlineHookCheck inline_check(
     wegame_white_addr_mark_list,
     true);
 ```
+# test
+There is no module of the hook wegame.exe process，Running the program outputs the following: No inline hooks were detected。
+
+![img](https://img2023.cnblogs.com/blog/2052882/202306/2052882-20230628161918266-1719341130.png)
+
+hook wegame.exe process after the SSOplatform.dll module，Running the program outputs the following: SSOPlatform.dll is detected as an inline hook.
+
+![img](https://img2023.cnblogs.com/blog/2052882/202306/2052882-20230628162241459-917249364.png)
