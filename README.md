@@ -42,6 +42,7 @@ There is no module of the hook wegame.exe process，Running the program outputs 
 
 ![img](https://img2023.cnblogs.com/blog/2052882/202306/2052882-20230628161918266-1719341130.png)
 
-hook wegame.exe process after the SSOplatform.dll module，Running the program outputs the following: SSOPlatform.dll is detected as an inline hook.
+hook wegame.exe process after the SSOplatform.dll module，Running the program outputs the following: SSOPlatform.dll is detected as an inline hook. He detects an inline hook at the address 0x629ddf07 of SSOPlatform.dll. The hook code jumps to the 0xd4f0 offset of feature_module.dll
 
-![img](https://img2023.cnblogs.com/blog/2052882/202306/2052882-20230628162241459-917249364.png)
+![img](https://img2023.cnblogs.com/blog/2052882/202307/2052882-20230718213430838-663166666.png)
+

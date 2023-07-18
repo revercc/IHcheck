@@ -1,12 +1,18 @@
 #include "inline_hook_check.h"
+#include <capstone/capstone/capstone.h>
 #include <Windows.h>
 #include <WinBase.h>
 #include <Psapi.h>
 #include <tchar.h>
 #include <Locale.h>
 #include <tlhelp32.h>
-using namespace IHcheck;
 
+#ifdef _X86_
+#pragma comment(lib, "../sysroot/lib/x86/capstone.lib")
+#else
+#endif
+#pragma warning(disable : 4996)
+using namespace IHcheck;
 PVOID ReadFileToMemoryW(const wchar_t* file_path, size_t* p_file_size)
 {
     PVOID pfile_buffer = NULL;
@@ -404,7 +410,6 @@ int CInlineHookCheck::do_reloc_import_table(
         // next dll
         p_import_descriptor++;
     }
-    end: 
     return 0;
 }
 
@@ -572,9 +577,91 @@ CInlineHookCheck::delete_inline_hook(
     return ret;
 }
 
-// ret -1: not check inline hook
-// ret -2: delete inline hook is error
-// ret  0: delete inline hook is success
+std::wstring
+CInlineHookCheck::parse_opcode(void* base, unsigned char* address, size_t size, size_t* parsed_size, uint64_t* module_offset)
+{
+    csh handle;
+    cs_insn* insn;
+    size_t insn_count;
+    uint64_t address_offset = 0;
+    if (CS_ERR_OK == cs_open(CS_ARCH_X86, CS_MODE_32, &handle)){
+        cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+        insn_count = cs_disasm(handle, address, size, (uint64_t)base, 0, &insn);
+        if (insn_count > 0) {
+            //printf("0x%" PRIx64 ":\t%s\t\t%s",insn->address, insn->mnemonic, insn->op_str);
+            // jmp address
+            if (cs_insn_group(handle, insn, X86_GRP_JUMP)) {
+                cs_x86* x86 = &(insn->detail->x86);
+                size_t op_count = cs_op_count(handle, insn, X86_OP_IMM);
+                if (op_count == 1) {
+                    int op_index = cs_op_index(handle, insn, X86_OP_IMM, 1);
+                    address_offset = x86->operands[op_index].imm;
+                    *parsed_size = insn->size;
+                }
+            }
+            // call address
+            else if (cs_insn_group(handle, insn, X86_GRP_CALL)) {
+                cs_x86* x86 = &(insn->detail->x86);
+                size_t op_count = cs_op_count(handle, insn, X86_OP_IMM);
+                if (op_count == 1) {
+                    int op_index = cs_op_index(handle, insn, X86_OP_IMM, 1);
+                    address_offset = x86->operands[op_index].imm;
+                    *parsed_size = insn->size;
+                }
+            }
+            // push address, ret
+            else if (insn[0].id == X86_INS_PUSH) {
+                if (insn_count >= 2 &&
+                    insn[1].id == X86_INS_RET) {
+                    cs_x86* x86 = &(insn->detail->x86);
+                    size_t op_count = cs_op_count(handle, insn, X86_OP_IMM);
+                    if (op_count == 1) {
+                        int op_index = cs_op_index(handle, insn, X86_OP_IMM, 1);
+                        address_offset = x86->operands[op_index].imm;
+                        *parsed_size = insn[0].size + insn[1].size;
+                    }
+                }
+            }
+            // mov eax(reg), address
+            else if (insn[0].id == X86_INS_MOV) {
+                cs_x86* x86 = &(insn->detail->x86);
+                size_t op_count = cs_op_count(handle, insn, X86_OP_IMM);
+                if (op_count == 1) {
+                    int op_index = cs_op_index(handle, insn, X86_OP_IMM, 1);
+                    address_offset = x86->operands[op_index].imm;
+                    *parsed_size = insn->size;
+                }
+            }
+            cs_free(insn, insn_count);
+        }
+        cs_close(&handle);
+    }
+    
+    std::wstring module_name = L"";
+    if (address_offset) {
+        HANDLE hModuleSnap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, target_pid);
+        if (hModuleSnap != INVALID_HANDLE_VALUE) {
+            MODULEENTRY32 me32;
+            me32.dwSize = sizeof(MODULEENTRY32);
+            if (Module32First(hModuleSnap, &me32)) {
+                do {
+                    if (address_offset >= (uint64_t)me32.modBaseAddr &&
+                        address_offset <= (uint64_t)me32.modBaseAddr + me32.modBaseSize) {
+                        module_name.append(me32.szModule);
+                        *module_offset = address_offset - (uint64_t)me32.modBaseAddr;
+                    }
+                } while (Module32Next(hModuleSnap, &me32));
+            }
+            CloseHandle(hModuleSnap);
+        }
+    }
+    return module_name;
+}
+
+
+// ret 0: not check inline hook
+// ret -1: delete inline hook is error
+// ret -2: delete inline hook is success
 int 
 CInlineHookCheck::cmp_text_segment(
     HANDLE hProcess, 
@@ -587,7 +674,7 @@ CInlineHookCheck::cmp_text_segment(
         NULL == old_module ||
         NULL == new_module ||
         NULL == file_buffer) {
-        return -1;
+        return 0;
     }
 
     PIMAGE_DOS_HEADER p_dos_header = (PIMAGE_DOS_HEADER)new_module;
@@ -604,44 +691,57 @@ CInlineHookCheck::cmp_text_segment(
         p_section_start++;
     }
     if (text_index == -1) {
-        return -1;
+        return 0;
     }
     PIMAGE_SECTION_HEADER p_new_module_text_section = p_section_start + text_index;
     PVOID p_new_module_text = (PVOID)((PBYTE)new_module + p_new_module_text_section->VirtualAddress);
-    //DWORD p_current_entry_offset = (p_optional_header->AddressOfEntryPoint - p_new_module_text_section->VirtualAddress);
     p_dos_header = (PIMAGE_DOS_HEADER)file_buffer;
     p_file_header = (PIMAGE_FILE_HEADER)((PBYTE)p_dos_header + p_dos_header->e_lfanew + 0x4);
     p_optional_header = (PIMAGE_OPTIONAL_HEADER32)((PBYTE)p_file_header + 0x14);
     PIMAGE_SECTION_HEADER p_file_text_section = (PIMAGE_SECTION_HEADER)((PBYTE)p_optional_header + p_file_header->SizeOfOptionalHeader) + text_index;
     PVOID p_file_text = (PVOID)((PBYTE)file_buffer + rva_to_va(new_module, p_file_text_section->VirtualAddress));
     
-    // filter white addr list
-    int ret = -1;
+    bool is_white_addr;
+    bool is_delete_inline = false;
     for (ULONG i = 0; i < p_new_module_text_section->SizeOfRawData; i++) {
         if (*((BYTE*)p_new_module_text + i) != *((BYTE*)p_file_text + i)) {
-            ret = 0;
+            // filter white addr list
+            is_white_addr = false;
             std::list<WHITE_ADDRESS>::iterator it;
             for (it = white_addr_list.begin(); it != white_addr_list.end(); it++) {
                 if ((ULONG_PTR)((PBYTE)p_new_module_text + i) >= (*it).address &&
                     (ULONG_PTR)((PBYTE)p_new_module_text + i - (*it).size) <= (*it).address) {
-                    ret = -1;
+                    i = i + (*it).size - 1;
+                    is_white_addr = true;
+ 
                     break;
                 }
             }
-            if (-1 != ret) {
-                break;
+            
+            if (!is_white_addr) {
+                // parse opcode
+                is_delete_inline = true;
+                void* opcode_base = (PBYTE)old_module + p_new_module_text_section->VirtualAddress + i;
+                size_t parsed_size = 0;
+                uint64_t module_offset = 0;
+                std::wstring module_name;
+                module_name = parse_opcode(opcode_base, (PBYTE)p_new_module_text + i, p_new_module_text_section->SizeOfRawData - i, &parsed_size, &module_offset);
+                if (module_name.length()) {
+                    i = i + parsed_size - 1;
+                    printf("\n    0x%x: goto %ls->0x%x\n", opcode_base, module_name.c_str(), module_offset);
+                }
             }
         }
     }
-    // 0370
     // delete inline hook
-    if (0 == ret) {
+    if (is_delete_inline) {
         PVOID p_old_module_text = (PVOID)((PBYTE)old_module + p_new_module_text_section->VirtualAddress);
         if (!delete_inline_hook(hProcess, p_old_module_text, p_file_text, p_new_module_text_section->SizeOfRawData)) {
-            ret = -2;
+            return -2;
         }
+        return -1;
     }
-    return ret;
+    return 0;
 }
 
 void CInlineHookCheck::start_hook_check()
@@ -665,75 +765,71 @@ void CInlineHookCheck::start_hook_check()
     if (hModuleSnap != INVALID_HANDLE_VALUE) {
         MODULEENTRY32 me32;
         me32.dwSize = sizeof(MODULEENTRY32);
-        if (!Module32First(hModuleSnap, &me32)) {
-            CloseHandle(hModuleSnap);
-            return;
-        }
+        if (Module32First(hModuleSnap, &me32)) {
+            do {
+                // filter check list
+                isPass = true;
+                std::list<std::wstring>::iterator it;
+                for (it = inline_check_list.begin(); it != inline_check_list.end(); it++) {
+                    std::wstring white_file_path = *it;
+                    if (!_wcsicmp(me32.szExePath, white_file_path.c_str())) {
+                        isPass = false;
+                        break;
+                    }
+                }
+                if (true == isPass &&
+                    false == is_check_all_module) {
+                    continue;
+                }
+                // do check
+                PVOID new_module = NULL;
+                HMODULE old_module = (HMODULE)me32.modBaseAddr;
+                PVOID file_buffer = NULL;
+                size_t file_size = 0;
+                file_buffer = ReadFileToMemoryW(me32.szExePath, &file_size);
+                if (file_buffer == NULL) {
+                    continue;
+                }
+                PIMAGE_DOS_HEADER p_dos_header = (PIMAGE_DOS_HEADER)file_buffer;
+                PIMAGE_FILE_HEADER p_file_header = (PIMAGE_FILE_HEADER)((PBYTE)p_dos_header + p_dos_header->e_lfanew + 0x4);
+                PIMAGE_OPTIONAL_HEADER32 p_optional_header = (PIMAGE_OPTIONAL_HEADER32)((PBYTE)p_file_header + 0x14);
+                PIMAGE_DATA_DIRECTORY p_data_directory = (PIMAGE_DATA_DIRECTORY)p_optional_header->DataDirectory;
+                PIMAGE_DATA_DIRECTORY p_data_directory_import = &p_data_directory[1];
+                PIMAGE_DATA_DIRECTORY p_data_directory_reloc = &p_data_directory[5];
+                DWORD size_of_image = p_optional_header->SizeOfImage;
+                // filter 32 bit module
+                if (p_file_header->Machine == IMAGE_FILE_MACHINE_I386) {
 
-        do {
-            // filter check list
-            isPass = true;
-            std::list<std::wstring>::iterator it;
-            for (it = inline_check_list.begin(); it != inline_check_list.end(); it++) {
-                std::wstring white_file_path = *it;
-                if (!_wcsicmp(me32.szExePath, white_file_path.c_str())) {
-                    isPass = false;
-                    break;
+                    new_module = copy_module(hProcess, file_buffer, file_size, old_module, size_of_image);
+                    if (new_module != NULL) {
+                        // init white addr list
+                        init_white_addr_list(new_module, size_of_image, me32);
+                        // .text to reloc
+                        do_reloc_table(p_optional_header->ImageBase, p_data_directory_reloc, old_module, new_module, file_buffer);
+                        // strip function forward
+                        strip_function_forward(file_buffer, new_module);
+                        // windows 7's import table to reloc
+                        if (!is_window10()) {
+                            // import table to reloc
+                            do_reloc_import_table(hProcess, p_optional_header->ImageBase, p_data_directory_import, old_module, new_module, file_buffer);
+                        }
+                        // check text segment
+                        int ret = cmp_text_segment(hProcess, old_module, new_module, file_buffer, white_addr_list);
+                        if (0 == ret) {
+                            printf("[+] %ls : not find inline hook\n", me32.szModule);
+                        }
+                        else if (-1 == ret) {
+                            printf("[-] %ls : delete inline hook is success\n", me32.szModule);
+                        }
+                        else {
+                            printf("[-] %ls : delete inline hook is error\n", me32.szModule);
+                        }
+                        free(new_module);
+                    }
                 }
-            }
-            if (true == isPass &&
-                false == is_check_all_module) {
-                continue;
-            }
-            // do check
-            PVOID new_module = NULL;
-            HMODULE old_module = (HMODULE)me32.modBaseAddr;
-            PVOID file_buffer = NULL;
-            size_t file_size = 0;
-            file_buffer = ReadFileToMemoryW(me32.szExePath, &file_size);
-            if (file_buffer == NULL) {
-                continue;
-            }
-            PIMAGE_DOS_HEADER p_dos_header = (PIMAGE_DOS_HEADER)file_buffer;
-            PIMAGE_FILE_HEADER p_file_header = (PIMAGE_FILE_HEADER)((PBYTE)p_dos_header + p_dos_header->e_lfanew + 0x4);
-            PIMAGE_OPTIONAL_HEADER32 p_optional_header = (PIMAGE_OPTIONAL_HEADER32)((PBYTE)p_file_header + 0x14);
-            PIMAGE_DATA_DIRECTORY p_data_directory = (PIMAGE_DATA_DIRECTORY)p_optional_header->DataDirectory;
-            PIMAGE_DATA_DIRECTORY p_data_directory_import = &p_data_directory[1];
-            PIMAGE_DATA_DIRECTORY p_data_directory_reloc = &p_data_directory[5];
-            DWORD size_of_image = p_optional_header->SizeOfImage;
-            // filter 32 bit module
-            if (p_file_header->Machine == IMAGE_FILE_MACHINE_I386) {
-                
-                new_module = copy_module(hProcess, file_buffer, file_size, old_module, size_of_image);
-                if (new_module != NULL) {
-                    // init white addr list
-                    init_white_addr_list(new_module, size_of_image, me32);
-                    // .text to reloc
-                    do_reloc_table(p_optional_header->ImageBase, p_data_directory_reloc, old_module, new_module, file_buffer);
-                    // strip function forward
-                    strip_function_forward(file_buffer, new_module);
-                    // windows 7's import table to reloc
-                    if (!is_window10()) {
-                        // import table to reloc
-                        do_reloc_import_table(hProcess, p_optional_header->ImageBase, p_data_directory_import, old_module, new_module, file_buffer);
-                    }
-                    // check text segment
-                    int ret = cmp_text_segment(hProcess, old_module, new_module, file_buffer, white_addr_list);
-                    if (0 == ret) {
-                        printf("[-] %ls : delete inline hook is success\n", me32.szModule);
-                        
-                    }
-                    else if (-2 == ret) {
-                        printf("[-] %ls : delete inline hook is error\n", me32.szModule);
-                    }
-                    else {
-                        printf("[+] %ls : not find inline hook\n", me32.szModule);
-                    }
-                    free(new_module);
-                }
-            }
-            free(file_buffer);
-        } while (Module32Next(hModuleSnap, &me32));
+                free(file_buffer);
+            } while (Module32Next(hModuleSnap, &me32));
+        }
         CloseHandle(hModuleSnap);
     }
     CloseHandle(hProcess);

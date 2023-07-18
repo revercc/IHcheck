@@ -1,4 +1,5 @@
 #include "inline_hook_check.h"
+#pragma warning(disable : 4996)
 int main(int argc, char* argv[], char* envp[])
 {
     // get wegame directory
