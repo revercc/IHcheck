@@ -303,8 +303,17 @@ int IHcheck::CInlineHookCheck::is_window10()
     return -1;
 }
 
-PVOID CInlineHookCheck::copy_module(HANDLE hProcess, PVOID file_buffer, size_t file_size, HMODULE old_module, DWORD size_of_image)
+PVOID CInlineHookCheck::copy_module(
+    HANDLE hProcess, 
+    PVOID file_buffer, 
+    size_t file_size, 
+    HMODULE old_module, 
+    DWORD size_of_image)
 {
+    if (file_buffer == NULL ||
+        old_module == NULL) {
+        return NULL;
+    }
     void* module_image = (UCHAR*)malloc(size_of_image);
     if (NULL != module_image) {
         memset(module_image, 0, size_of_image);
@@ -317,7 +326,12 @@ PVOID CInlineHookCheck::copy_module(HANDLE hProcess, PVOID file_buffer, size_t f
         // copy all section
         for (int i = 0; i < p_file_header->NumberOfSections; i++) {
             DWORD old_protect = 0;
-            if (VirtualProtectEx(hProcess, (PBYTE)old_module + p_section_start->VirtualAddress, p_section_start->SizeOfRawData, PAGE_EXECUTE_READ, &old_protect)) {
+            if (VirtualProtectEx(
+                hProcess, 
+                (PBYTE)old_module + p_section_start->VirtualAddress, 
+                p_section_start->SizeOfRawData, 
+                PAGE_EXECUTE_READ, 
+                &old_protect)) {
                 if (!ReadProcessMemory(
                     hProcess,
                     (PBYTE)old_module + p_section_start->VirtualAddress,
@@ -327,7 +341,12 @@ PVOID CInlineHookCheck::copy_module(HANDLE hProcess, PVOID file_buffer, size_t f
                     free(module_image);
                     module_image = NULL;
                 }
-                VirtualProtectEx(hProcess, (PBYTE)old_module + p_section_start->VirtualAddress, p_section_start->SizeOfRawData, old_protect, &old_protect);
+                VirtualProtectEx(
+                    hProcess, 
+                    (PBYTE)old_module + p_section_start->VirtualAddress,
+                    p_section_start->SizeOfRawData, 
+                    old_protect, 
+                    &old_protect);
             }
             else{
                 // windows7 kernel.dll cannot modify memory properties, Memory can be read directly
@@ -484,6 +503,9 @@ CInlineHookCheck::init_white_addr_list(
     DWORD size_of_image,
     MODULEENTRY32 module32_info)
 {
+    if (new_module == NULL) {
+        return;
+    }
     // init white addr list
     white_addr_list.clear();
     // kernel32.dll 's SetUnhandledExceptionFilter function header machine code is modified by the system
@@ -524,6 +546,11 @@ CInlineHookCheck::delete_inline_hook(
     DWORD size)
 {
     bool ret = 0;
+    if (old_module == NULL ||
+        file_text_section == NULL) {
+        return ret;
+    }
+
     bool is_delete = true;
     // pause all thread
     HANDLE snapHandele = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
@@ -578,8 +605,19 @@ CInlineHookCheck::delete_inline_hook(
 }
 
 std::wstring
-CInlineHookCheck::parse_opcode(void* base, unsigned char* address, size_t size, size_t* parsed_size, uint64_t* module_offset)
+CInlineHookCheck::parse_opcode(
+    void* base, 
+    unsigned char* address, 
+    size_t size, 
+    size_t* parsed_size, 
+    uint64_t* module_offset)
 {
+    if (base == NULL ||
+        address == NULL ||
+        parsed_size == NULL ||
+        module_offset == NULL) {
+        return L"";
+    }
     csh handle;
     cs_insn* insn;
     size_t insn_count;
@@ -728,7 +766,7 @@ CInlineHookCheck::cmp_text_segment(
                 module_name = parse_opcode(opcode_base, (PBYTE)p_new_module_text + i, p_new_module_text_section->SizeOfRawData - i, &parsed_size, &module_offset);
                 if (module_name.length()) {
                     i = i + parsed_size - 1;
-                    printf("\n    0x%x: goto %ls->0x%x\n", opcode_base, module_name.c_str(), module_offset);
+                    printf("\n    0x%p: goto %ls->0x%x\n", opcode_base, module_name.c_str(), (unsigned int)module_offset);
                 }
             }
         }
