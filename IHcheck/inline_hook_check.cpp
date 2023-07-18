@@ -8,7 +8,7 @@
 #include <tlhelp32.h>
 
 #ifdef _X86_
-#pragma comment(lib, "../sysroot/lib/x86/capstone.lib")
+#pragma comment(lib, "../sysroot/lib/capstone.lib")
 #else
 #endif
 #pragma warning(disable : 4996)
